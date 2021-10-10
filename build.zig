@@ -13,9 +13,6 @@ pub fn build(b: *Builder) void {
 
     const exe = b.addExecutable("zecho", "src/zecho.zig");
     exe.linkLibC();
-    exe.addIncludeDir("lib/libuv");
-    exe.addLibPath("lib/libuv");
-    exe.linkSystemLibrary("libuv");
     exe.setTarget(target);
     exe.setBuildMode(mode);
     exe.install();
