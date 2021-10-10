@@ -130,7 +130,7 @@ pub fn main() !void {
             try io.getStdErr().writeAll("Invalid argument for -n expected type [u64]\n");
             os.exit(1);
         }
-    }    
+    }
     if (result.argFlag("-t")) |count| {
         const maybe_count = fmt.parseInt(u32,  std.mem.span(count), 10) catch null;
         if (maybe_count) |int_count| {
@@ -141,6 +141,7 @@ pub fn main() !void {
             os.exit(1);
         }
     }
+    //TODO: Implement
     if (result.argFlag("-s")) |count| {
         const maybe_count = fmt.parseInt(u32,  std.mem.span(count), 10) catch null;
         if (maybe_count) |int_count| {
@@ -261,12 +262,8 @@ fn send_data(net_stream: *const std.net.Stream, noalias rbarrier: *const Barrier
     var loop: u64 = 0;
     var serr: u64 = 0;
     var runtime: i64 = 0;
-    var finished: bool = false;
-    var event: std.Thread.ResetEvent = undefined;
-    try event.init();
-    defer event.deinit();
-    
-    var match = &(try std.Thread.spawn(.{}, matcher, .{net_stream, &finished, &event, rbarrier}));
+
+    var match = &(try std.Thread.spawn(.{}, matcher, .{net_stream, rbarrier}));
 
     var start = std.time.milliTimestamp();
     while (true) {
@@ -307,9 +304,6 @@ fn send_data(net_stream: *const std.net.Stream, noalias rbarrier: *const Barrier
     }
 
     match.detach();
-    finished = true;
-    event.wait();
-    info("exited wait. {}", .{std.Thread.getCurrentId()});
 
     var end = std.time.milliTimestamp();
 
@@ -321,13 +315,12 @@ fn send_data(net_stream: *const std.net.Stream, noalias rbarrier: *const Barrier
     });
 }
 
-fn matcher(net_stream: *const std.net.Stream, finished: *bool, event: *std.Thread.ResetEvent, noalias rbarrier: *const Barrier) anyerror!void {
+fn matcher(net_stream: *const std.net.Stream, noalias rbarrier: *const Barrier) anyerror!void {
 
     var recv: u64 = 0;
     var unmatched: u64 = 0;
     var start = std.time.milliTimestamp();
     var match: u64 = 0;
-    _ = event;
 
     rbarrier.wait();
     while (rbarrier.isRunning()) {
@@ -347,10 +340,6 @@ fn matcher(net_stream: *const std.net.Stream, finished: *bool, event: *std.Threa
         } else {
             unmatched += 1;
         }
-
-        if(finished.*) {
-            break;
-        }
     }
     info("exited matcher.", .{});
     var end = std.time.milliTimestamp();
@@ -362,5 +351,4 @@ fn matcher(net_stream: *const std.net.Stream, finished: *bool, event: *std.Threa
         end - start,
         std.Thread.getCurrentId(),
     });
-    event.set();
 }
