@@ -196,8 +196,13 @@ pub fn main() !void {
     }
     barrier.start();
     rbarrier.start();
-    var duration: u64 = arg_duration / 1000;
-    std.os.nanosleep(duration, 0);
+    var duration: f64 = @intToFloat(f64, arg_duration);
+
+    if(arg_duration >= 1000) {
+        std.os.nanosleep(arg_duration / 1000, 0);
+    } else {
+        std.os.nanosleep(0, arg_duration * std.time.ns_per_ms);
+    }
 
     var end = std.time.milliTimestamp();
     std.debug.print("{} total packets sent, {} received, and {} matched in {}ms\n{} packets sent/s, {} packets received/s, {} matched goodput/s \n", .{
@@ -205,9 +210,9 @@ pub fn main() !void {
         total_recv.get(),
         total_good.get(),
         end - start,
-        @divTrunc(total_sent.get(), duration),
-        @divTrunc(total_recv.get(), duration),
-        @divTrunc(total_good.get(), duration),
+        @floatToInt(u64, @divTrunc(@intToFloat(f64, total_sent.get()), duration / 1000)),
+        @floatToInt(u64, @divTrunc(@intToFloat(f64, total_recv.get()), duration / 1000)),
+        @floatToInt(u64, @divTrunc(@intToFloat(f64, total_good.get()), duration / 1000)),
     });
 }
 
