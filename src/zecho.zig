@@ -199,7 +199,7 @@ pub fn main() !void {
     var duration: f64 = @intToFloat(f64, arg_duration);
 
     if(arg_duration >= 1000) {
-        std.os.nanosleep(arg_duration / 1000, 0);
+        std.os.nanosleep(arg_duration / 1000, (arg_duration % 1000) * std.time.ns_per_ms);
     } else {
         std.os.nanosleep(0, arg_duration * std.time.ns_per_ms);
     }
