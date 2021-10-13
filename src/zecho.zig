@@ -359,8 +359,8 @@ fn matcher(net_stream: *const std.net.Stream, noalias rbarrier: *const Barrier) 
     var match: u64 = 0;
 
     rbarrier.wait();
+    const buf = try allocator.alloc(u8, data_len);
     while (rbarrier.isRunning()) {
-        const buf = try allocator.alloc(u8, data_len);
         var bytes = net_stream.read(buf[0..]) catch break;
 
         if(bytes == -1) {
