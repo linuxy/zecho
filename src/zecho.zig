@@ -31,7 +31,8 @@ const ArrayList = std.ArrayList;
 var gpa = std.heap.GeneralPurposeAllocator(.{}){};
 const allocator = &gpa.allocator;
 
-const data = "hello";
+var data: []u8 = undefined;
+var data_len: usize = 0;
 
 const usage =
     \\zecho benchmark
@@ -141,7 +142,6 @@ pub fn main() !void {
             os.exit(1);
         }
     }
-    //TODO: Implement
     if (result.argFlag("-s")) |count| {
         const maybe_count = fmt.parseInt(u32,  std.mem.span(count), 10) catch null;
         if (maybe_count) |int_count| {
@@ -169,6 +169,33 @@ pub fn main() !void {
         }
     }
 
+    var prng = std.rand.DefaultPrng.init(blk: {
+        var seed: u64 = undefined;
+        std.os.getrandom(std.mem.asBytes(&seed)) catch {
+            warn("OS getRandom failed.", .{});
+            std.process.exit(1);
+        };
+        break :blk seed;
+    });
+    const rand = &prng.random;
+
+    if(arg_packetsize > 0) {
+        var i: usize = 0;
+        data = try allocator.alloc(u8, arg_packetsize);
+        while (i < arg_packetsize) : (i += 1) {
+            data[i] = rand.intRangeLessThan(u8, 1, 255);
+            data_len += 1;
+        }
+        info("data: {s}", .{data});
+    } else {
+        data = try allocator.alloc(u8, 5);
+        data[0] = 'h';
+        data[1] = 'e';
+        data[2] = 'l';
+        data[3] = 'l';
+        data[4] = 'o';
+        data_len = 5;
+    }
     info("Running...", .{});
 
     var i: usize = 0;
@@ -205,7 +232,7 @@ pub fn main() !void {
     }
 
     var end = std.time.milliTimestamp();
-    std.debug.print("{} total packets sent, {} received, and {} matched in {}ms\n{} packets sent/s, {} packets received/s, {} matched goodput/s \n", .{
+    std.debug.print("{} total packets sent, {} received, and {} matched in {}ms\n{} packets sent/s, {} packets received/s, {} matched goodput/s @ {} bytes\n", .{
         total_sent.get(),
         total_recv.get(),
         total_good.get(),
@@ -213,6 +240,7 @@ pub fn main() !void {
         @floatToInt(u64, @divTrunc(@intToFloat(f64, total_sent.get()), duration / 1000)),
         @floatToInt(u64, @divTrunc(@intToFloat(f64, total_recv.get()), duration / 1000)),
         @floatToInt(u64, @divTrunc(@intToFloat(f64, total_good.get()), duration / 1000)),
+        data_len,
     });
 }
 
@@ -248,17 +276,20 @@ fn establish_connection(noalias barrier: *const Barrier, noalias rbarrier: *cons
     var stream: std.net.Stream = undefined;
 
     barrier.wait();
+    var conerr: bool = false;
     while(barrier.isRunning()) {
         info("barrier is running", .{});
         stream = std.net.tcpConnectToAddress(parsed_address) catch|err|{
-            warn("unable to connect: {} ; retrying\n", .{err});
-            std.time.sleep(2_000_000_000);
-            continue;
+            warn("unable to connect: {};\n", .{err});
+            conerr = true;
+            break;
         };
         break;
     }
     try send_data(&stream, rbarrier);    
-    defer stream.close();
+    if(!conerr) {
+        _ = stream.close();
+    }
 }
 
 fn send_data(net_stream: *const std.net.Stream, noalias rbarrier: *const Barrier) anyerror!void {
@@ -274,7 +305,7 @@ fn send_data(net_stream: *const std.net.Stream, noalias rbarrier: *const Barrier
     while (true) {
 
         var to_send = data;
-        if(net_stream.write(to_send[0..])) |err| {
+        if(net_stream.write(to_send[0..data_len])) |err| {
             _ = err;
             sent += 1;
             _ = total_sent.incr();
@@ -329,7 +360,7 @@ fn matcher(net_stream: *const std.net.Stream, noalias rbarrier: *const Barrier) 
 
     rbarrier.wait();
     while (rbarrier.isRunning()) {
-        var buf: [data.len]u8 = undefined;
+        const buf = try allocator.alloc(u8, data_len);
         var bytes = net_stream.read(buf[0..]) catch break;
 
         if(bytes == -1) {
@@ -339,7 +370,7 @@ fn matcher(net_stream: *const std.net.Stream, noalias rbarrier: *const Barrier) 
             _ = total_recv.incr();
         }
 
-        if(std.mem.eql(u8, buf[0..], data)) {
+        if(std.mem.eql(u8, buf[0..], data[0..data_len])) {
             match += 1;
             _ = total_good.incr();
         } else {
