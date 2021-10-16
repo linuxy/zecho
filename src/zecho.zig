@@ -14,7 +14,7 @@ const os = std.os;
 pub const log_level: std.log.Level = .warn;
 var arg_duration: u32 = 0;
 var arg_packetsize: u32 = 0;
-var arg_count: i32 = 1;
+var arg_count: u64 = 1;
 var arg_address: [:0]const u8 = undefined;
 var arg_port: u16 = 0;
 var arg_numpacket: u64 = 0;
@@ -113,12 +113,12 @@ pub fn main() !void {
         }
     }
     if (result.argFlag("-c")) |count| {
-        const maybe_count = fmt.parseInt(i32,  std.mem.span(count), 10) catch null;
+        const maybe_count = fmt.parseInt(u64,  std.mem.span(count), 10) catch null;
         if (maybe_count) |int_count| {
             info("Found int count: {}", .{int_count});
             arg_count = int_count;
         } else {
-            try io.getStdErr().writeAll("Invalid argument for -c expected type [i32]\n");
+            try io.getStdErr().writeAll("Invalid argument for -c expected type [u64]\n");
             os.exit(1);
         }
     }
@@ -223,7 +223,6 @@ pub fn main() !void {
     }
     barrier.start();
     rbarrier.start();
-    var duration: f64 = @intToFloat(f64, arg_duration);
 
     if(arg_duration >= 1000) {
         std.os.nanosleep(arg_duration / 1000, (arg_duration % 1000) * std.time.ns_per_ms);
@@ -231,7 +230,16 @@ pub fn main() !void {
         std.os.nanosleep(0, arg_duration * std.time.ns_per_ms);
     }
 
+    if(arg_numpacket > 0) {
+        while((total_sent.get() / arg_count) < arg_numpacket) {
+            std.os.nanosleep(0, 100_000);
+        }
+    }
+
     var end = std.time.milliTimestamp();
+    var duration: f64 = @intToFloat(f64, end - start);
+
+    info("total sent {} {}\n", .{total_sent.get(), duration});
     std.debug.print("{} total packets sent, {} received, and {} matched in {}ms\n{} packets sent/s, {} packets received/s, {} matched goodput/s @ {} bytes\n", .{
         total_sent.get(),
         total_recv.get(),
@@ -297,12 +305,11 @@ fn send_data(net_stream: *const std.net.Stream, noalias rbarrier: *const Barrier
     var sent: u64 = 0;
     var loop: u64 = 0;
     var serr: u64 = 0;
-    var runtime: i64 = 0;
 
     var match = &(try std.Thread.spawn(.{}, matcher, .{net_stream, rbarrier}));
 
     var start = std.time.milliTimestamp();
-    while (true) {
+    while (rbarrier.isRunning()) {
 
         var to_send = data;
         if(net_stream.write(to_send[0..data_len])) |err| {
@@ -325,16 +332,8 @@ fn send_data(net_stream: *const std.net.Stream, noalias rbarrier: *const Barrier
         }
         loop += 1;
 
-        //Only check time every 10k packets ~ 3ms
-        if((std.math.mod(u64, loop, 10000) catch unreachable) == 0) {
-            runtime = std.time.milliTimestamp(); 
-        }
         if((arg_numpacket > 0) and (loop >= arg_numpacket)) {
             info("exited number. {}", .{std.Thread.getCurrentId()});
-            break;
-        }
-        if((arg_duration > 0) and (runtime >= (start + arg_duration))) {
-            info("exited duration. {}", .{std.Thread.getCurrentId()});
             break;
         }
     }
