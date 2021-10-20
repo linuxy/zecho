@@ -256,6 +256,7 @@ fn standard_setup() !void {
         }
     }
 
+    barrier.stop();
     var end = std.time.milliTimestamp();
     var duration: f64 = @intToFloat(f64, end - start);
 
@@ -381,6 +382,7 @@ fn uring_setup() !void {
         std.os.nanosleep(0, arg_duration * std.time.ns_per_ms);
     }
 
+    barrier.stop();
     var end = std.time.milliTimestamp();
     var duration: f64 = @intToFloat(f64, end - start);
 
@@ -395,6 +397,7 @@ fn uring_setup() !void {
 
 fn uring_connect(send_ring: *std.os.linux.IO_Uring, noalias barrier: *Barrier) !void {
 
+    barrier.wait();
     const client = &(try std.x.net.tcp.Client.init(.ip, .{ .close_on_exec = true, .nonblocking = true }));
     defer client.deinit();
 
