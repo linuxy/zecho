@@ -7,7 +7,7 @@ const debug = std.debug;
 const warn = std.debug.warn;
 const info = std.log.info;
 const assert = std.debug.assert;
-const builtin = std.builtin;
+const builtin = @import("builtin");
 const net = std.net;
 const os = std.os;
 
@@ -19,12 +19,15 @@ var arg_address: [:0]const u8 = undefined;
 var arg_port: u16 = 0;
 var arg_numpacket: u64 = 0;
 var arg_udp: bool = false;
+var arg_uring: bool = false;
 var parsed_address: std.net.Address = undefined;
 var found_port: bool = false;
 var found_address: bool = false;
 var total_sent: atomic.Int(u64) = atomic.Int(u64).init(0);
 var total_recv: atomic.Int(u64) = atomic.Int(u64).init(0);
 var total_good: atomic.Int(u64) = atomic.Int(u64).init(0);
+var sent_pps = std.atomic.Atomic(usize).init(0);
+var recv_pps = std.atomic.Atomic(usize).init(0);
 var exiting: bool = false;
 const Allocator = std.mem.Allocator;
 const ArrayList = std.ArrayList;
@@ -37,9 +40,9 @@ var data_len: usize = 0;
 const usage =
     \\zecho benchmark
     \\
-    \\usage: zecho [ -a <address> ] [ -p <port> ] ( -t <send duration (ms)> ) ( -s <packet size> ) ( -c <parallel connections> ) ( -n <packets per con.> )
-    \\       zecho (-h | --help)
-    \\       zecho (-v | --version)
+    \\usage: zecho [ -a <address> ] [ -p <port> ] ( -t <send duration (ms)> ) ( -s <packet size> ) ( -c <parallel connections> ) ( -n <packets per con.> ) ( --uring )
+    \\       zecho ( -h | --help )
+    \\       zecho ( -v | --version )
     \\
 ;
 
@@ -54,6 +57,17 @@ const build_version =
     \\
 ;
 
+const Event = packed struct {
+    fd: i32,
+    op: Op,
+};
+
+const Op = enum(u32) {
+    Accept,
+    Recv,
+    Send,
+};
+
 pub fn main() !void {
 
     const argv: [][*:0]const u8 = os.argv;
@@ -64,6 +78,7 @@ pub fn main() !void {
         .{ .name = "-v", .kind = .boolean },
         .{ .name = "-u", .kind = .boolean },        
         .{ .name = "--udp", .kind = .boolean },
+        .{ .name = "--uring", .kind = .boolean },
         .{ .name = "-c", .kind = .arg },
         .{ .name = "-s", .kind = .arg },
         .{ .name = "-t", .kind = .arg },
@@ -90,7 +105,11 @@ pub fn main() !void {
     //TODO: implement
     if (result.boolFlag("-u") or result.boolFlag("--udp")) {
         arg_udp = true;
-    }    
+    }
+    if (result.boolFlag("--uring")) {
+        arg_uring = true;
+        if (builtin.os.tag != .linux) return error.LinuxRequired;
+    }
     if (result.argFlag("-a")) |address| {
         if(result.args.len == 0) {
             info("Found ip address: {s}", .{address});
@@ -198,6 +217,18 @@ pub fn main() !void {
     }
     info("Running...", .{});
 
+    if(!arg_uring) {
+        try standard_setup();
+    } else {
+        if(arg_count > 4) {
+            arg_count = 4;
+        }
+        try uring_setup();
+    }
+
+}
+
+fn standard_setup() !void {
     var i: usize = 0;
     var threads = ArrayList(std.Thread).init(allocator);
 
@@ -297,6 +328,171 @@ fn establish_connection(noalias barrier: *const Barrier, noalias rbarrier: *cons
     try send_data(&stream, rbarrier);    
     if(!conerr) {
         _ = stream.close();
+    }
+}
+
+fn uring_setup() !void {
+
+    var num_rings: usize = 0;
+    var send_rings = ArrayList(std.os.linux.IO_Uring).init(allocator);
+
+    while(num_rings < arg_count) : (num_rings+=1) {    
+        _ = try send_rings.append(undefined);
+    }
+
+    std.debug.print("only send supported with uring currently.\n", .{});
+    std.debug.print("waiting for {} threads to finish.\n", .{num_rings});
+
+    var ring_index: usize = 0;
+    errdefer for (send_rings.items) |*send_ring| send_ring.deinit();
+
+    while (ring_index < num_rings) : (ring_index += 1) {
+        var send_params = switch (ring_index) {
+            0 => std.mem.zeroInit(std.os.linux.io_uring_params, .{
+                .flags = 0,
+                .sq_thread_cpu = @intCast(u32, ring_index),
+                .sq_thread_idle = 1000,
+            }),
+            else => std.mem.zeroInit(std.os.linux.io_uring_params, .{
+                .flags = std.os.linux.IORING_SETUP_ATTACH_WQ,
+                .wq_fd = @intCast(u32, send_rings.items[0].fd),
+                .sq_thread_cpu = @intCast(u32, ring_index),
+                .sq_thread_idle = 1000,
+            }),
+        };
+        send_rings.items[ring_index] = try std.os.linux.IO_Uring.init_params(4096, &send_params);
+    }
+
+    var num_threads: usize = 0;
+    var send_threads = ArrayList(std.Thread).init(allocator);
+
+    while(num_threads < arg_count) : (num_threads+=1) {    
+        _ = try send_threads.append(undefined);
+    }
+
+    var thread_index: usize = 0;
+    defer for (send_threads.items) |*send_thread| send_thread.join();
+
+    var barrier = Barrier{};
+
+    var start = std.time.milliTimestamp();
+
+    while (thread_index < num_threads) : (thread_index += 1) {
+        send_threads.items[thread_index] = try std.Thread.spawn(.{}, uring_connect, .{ &send_rings.items[thread_index], &barrier });
+    }
+
+    var stats = &(try std.Thread.spawn(.{}, uring_stats, .{&barrier}));
+    stats.detach();
+
+    barrier.start();
+
+    if(arg_duration >= 1000) {
+        std.os.nanosleep(arg_duration / 1000, (arg_duration % 1000) * std.time.ns_per_ms);
+    } else {
+        std.os.nanosleep(0, arg_duration * std.time.ns_per_ms);
+    }
+
+    var end = std.time.milliTimestamp();
+    var duration: f64 = @intToFloat(f64, end - start);
+
+    info("total sent {} {}\n", .{total_sent.get(), duration});
+    std.debug.print("{} total packets sent in {}ms\n{} packets sent/s @ {} bytes\n", .{
+        total_sent.get(),
+        end - start,
+        @floatToInt(u64, @divTrunc(@intToFloat(f64, total_sent.get()), duration / 1000)),
+        data_len,
+    });
+}
+
+fn uring_connect(send_ring: *std.os.linux.IO_Uring, noalias barrier: *Barrier) !void {
+
+    const client = &(try std.x.net.tcp.Client.init(.ip, .{ .close_on_exec = true, .nonblocking = true }));
+    defer client.deinit();
+
+    try client.setNoDelay(true);
+
+    client.connect(std.x.net.ip.Address.initIPv4(std.x.os.IPv4.localhost, arg_port)) catch |err| switch (err) {
+        error.WouldBlock => try client.getError(),
+        else => return err,
+    };
+
+    try uring_send(send_ring, client, barrier);
+}
+
+fn uring_stats(noalias barrier: *const Barrier) !void {
+
+    var timer = try std.time.Timer.start();
+
+    while(barrier.isRunning()) {
+        if (timer.read() > 1 * std.time.ns_per_s) {
+            std.log.info("sent {} packet(s) in the last second", .{sent_pps.swap(0, .Monotonic)});
+            std.log.info("received {} packet(s) in the last second", .{recv_pps.swap(0, .Monotonic)});
+            timer.reset();
+        }
+    }
+}
+
+fn uring_send(ring: *std.os.linux.IO_Uring, client: *std.x.net.tcp.Client, noalias barrier: *Barrier) !void {
+
+    var cqes: [4096]std.os.linux.io_uring_cqe = undefined;
+
+    var packets_sent: u64 = 0;
+    outer: while(barrier.isRunning()) {
+        var i: usize = 0;
+        while(i < 2048) : ( i+= 1) {
+            _ = ring.send(0, client.socket.fd, data[0..data_len], std.os.linux.MSG.NOSIGNAL) catch |err| switch (err) {
+                    error.SubmissionQueueFull => break,
+                    else => return err,
+            };
+        }
+
+        _ = ring.submit() catch |err| switch (err) {
+            error.CompletionQueueOvercommitted, error.SystemResources => {},
+            else => return err,
+        };
+
+        const num_completions = try ring.copy_cqes(&cqes, 0);
+        for (cqes[0..num_completions]) |completion| {
+            if (completion.res < 0) {
+                return switch (std.os.errno(@intCast(usize, -completion.res))) {
+                    .CONNREFUSED => error.ConnectionRefused,
+                    .ACCES => error.AccessDenied,
+                    .AGAIN => error.WouldBlock,
+                    .ALREADY => error.FastOpenAlreadyInProgress,
+                    .BADF => unreachable,
+                    .CONNRESET => error.ConnectionResetByPeer,
+                    .DESTADDRREQ => unreachable,
+                    .FAULT => unreachable,
+                    .INTR => continue,
+                    .INVAL => unreachable,
+                    .ISCONN => unreachable,
+                    .MSGSIZE => error.MessageTooBig,
+                    .NOBUFS => error.SystemResources,
+                    .NOMEM => error.SystemResources,
+                    .NOTSOCK => unreachable,
+                    .OPNOTSUPP => unreachable,
+                    .PIPE => error.BrokenPipe,
+                    .AFNOSUPPORT => error.AddressFamilyNotSupported,
+                    .LOOP => error.SymLinkLoop,
+                    .NAMETOOLONG => error.NameTooLong,
+                    .NOENT => error.FileNotFound,
+                    .NOTDIR => error.NotDir,
+                    .HOSTUNREACH => error.NetworkUnreachable,
+                    .NETUNREACH => error.NetworkUnreachable,
+                    .NOTCONN => error.SocketNotConnected,
+                    .NETDOWN => error.NetworkSubsystemFailed,
+                    else => |err| std.os.unexpectedErrno(err),
+                };
+            }
+            _ = sent_pps.fetchAdd(1, .Monotonic);
+            _ = total_sent.incr();  
+            packets_sent += 1;
+        }
+        if((arg_numpacket > 0) and (packets_sent >= arg_numpacket)) {
+            info("exited number. {}", .{std.Thread.getCurrentId()});
+            barrier.stop();
+            break :outer;
+        }
     }
 }
 
