@@ -5,7 +5,7 @@ A zig echo server benchmark.
 $ zig build
 $ ./zig-out/bin/zecho --help
 
-usage: zecho [ -a <address> ] [ -p <port> ] ( -t <send duration (ms)> ) ( -s <packet size> ) ( -c <parallel connections> ) ( -n <packets per con.> )
+usage: zecho [ -a <address> ] [ -p <port> ] ( -t <send duration (ms)> ) ( -s <packet size> ) ( -c <parallel connections> ) ( -n <packets per con.> ) ( --uring )
        zecho (-h | --help)
        zecho (-v | --version)
 ```
