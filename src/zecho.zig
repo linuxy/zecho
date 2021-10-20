@@ -57,17 +57,6 @@ const build_version =
     \\
 ;
 
-const Event = packed struct {
-    fd: i32,
-    op: Op,
-};
-
-const Op = enum(u32) {
-    Accept,
-    Recv,
-    Send,
-};
-
 pub fn main() !void {
 
     const argv: [][*:0]const u8 = os.argv;
@@ -411,7 +400,7 @@ fn uring_connect(send_ring: *std.os.linux.IO_Uring, noalias barrier: *Barrier) !
 
     try client.setNoDelay(true);
 
-    client.connect(std.x.net.ip.Address.initIPv4(std.x.os.IPv4.localhost, arg_port)) catch |err| switch (err) {
+    client.connect(std.x.net.ip.Address.initIPv4(try std.x.os.IPv4.parse(arg_address), arg_port)) catch |err| switch (err) {
         error.WouldBlock => try client.getError(),
         else => return err,
     };
