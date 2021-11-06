@@ -185,7 +185,7 @@ pub fn main() !void {
         };
         break :blk seed;
     });
-    const rand = &prng.random;
+    const rand = prng.random();
 
     if(arg_packetsize > 0) {
         var i: usize = 0;
