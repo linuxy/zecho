@@ -1,6 +1,7 @@
 # zecho
 A zig echo server benchmark.
 
+builds against zig 0.9.0-dev.1561+5ebdc8c46
 ```
 $ zig build
 $ ./zig-out/bin/zecho --help
